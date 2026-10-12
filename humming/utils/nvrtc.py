@@ -12,6 +12,9 @@ from humming.utils.cuda import filter_cuda_paths
 
 
 def _select_nvrtc_lib(lib_dir):
+    if jit_utils.IS_WINDOWS:
+        libraries = sorted(glob.glob(os.path.join(lib_dir, "nvrtc64_*.dll")))
+        return libraries[-1] if libraries else None
     unversioned = os.path.join(lib_dir, "libnvrtc.so")
     if os.path.exists(unversioned):
         return unversioned
@@ -30,6 +33,14 @@ def _find_nvrtc_lib_dir():
         *sorted(glob.glob(os.path.join(root, "*", "lib64"))),
         *sorted(glob.glob(os.path.join(root, "*", "lib"))),
     ]
+    if jit_utils.IS_WINDOWS:
+        arch = "arm64" if jit_utils.get_native_arch() == "aarch64" else "x64"
+        candidates = [
+            os.path.join(root, "bin", arch),
+            os.path.join(root, "bin"),
+            *sorted(glob.glob(os.path.join(root, "*", "bin", arch))),
+            *sorted(glob.glob(os.path.join(root, "*", "bin"))),
+        ]
     for d in candidates:
         lib_path = _select_nvrtc_lib(d)
         if lib_path is not None:
@@ -43,16 +54,21 @@ _cached_binary_path = None
 def get_nvrtc_library_path():
     _, lib_path, _ = _find_nvrtc_lib_dir()
     if lib_path is None:
-        raise RuntimeError("Could not locate libnvrtc.so in CUDA path")
+        raise RuntimeError("Could not locate the NVRTC library in CUDA path")
     return lib_path
 
 
-def build_nvrtc_compile_binary(output_path, compiler="g++"):
+def build_nvrtc_compile_binary(output_path, compiler=None):
     _, _, cuda_env = _find_nvrtc_lib_dir()
     include_paths = list(cuda_env["include_paths"])
     src_path = Path(__file__).parents[1] / "csrc" / "nvrtc_compile.cpp"
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    compiler = compiler or jit_utils.get_cpp_compiler()
+    if jit_utils.IS_WINDOWS:
+        return jit_utils.build_msvc_native(
+            src_path, output_path, compiler, include_paths=include_paths, shared=False
+        )
     tmp_path = output_path.with_suffix(".tmp")
     cmd = [
         compiler,
@@ -83,8 +99,9 @@ def may_build_nvrtc_compile_binary():
     src_path = os.path.abspath(src_path)
     lib_dir, lib_path, cuda_env = _find_nvrtc_lib_dir()
     if lib_dir is None:
-        raise RuntimeError("Could not locate libnvrtc.so in CUDA path")
-    native_path = jit_utils.get_precompiled_artifact_path(src_path, "nvrtc_compile")
+        raise RuntimeError("Could not locate the NVRTC library in CUDA path")
+    binary_name = jit_utils.get_native_artifact_name("nvrtc_compile")
+    native_path = jit_utils.get_precompiled_artifact_path(src_path, binary_name)
     if native_path is not None:
         _cached_binary_path = native_path.as_posix()
         return _cached_binary_path
@@ -101,13 +118,12 @@ def may_build_nvrtc_compile_binary():
         sort_keys=True,
         ensure_ascii=False,
     )
-    compiler = os.environ.get("CXX") or "g++"
     env_signature += jit_utils.get_native_platform_signature()
     full_hash = jit_utils.hash_to_hex(src_hash + "$$" + env_signature)
 
     build_dir = Path(jit_utils.get_humming_cache_dir()) / "nvrtc_compile" / full_hash
     build_dir.mkdir(parents=True, exist_ok=True)
-    binary_path = build_dir / "nvrtc_compile"
+    binary_path = build_dir / binary_name
 
     if binary_path.exists():
         _cached_binary_path = binary_path.as_posix()
@@ -119,7 +135,7 @@ def may_build_nvrtc_compile_binary():
             _cached_binary_path = binary_path.as_posix()
             return _cached_binary_path
 
-        _cached_binary_path = build_nvrtc_compile_binary(binary_path, compiler=compiler)
+        _cached_binary_path = build_nvrtc_compile_binary(binary_path)
         return _cached_binary_path
 
 

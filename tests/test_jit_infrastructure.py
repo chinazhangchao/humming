@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -102,6 +104,209 @@ def test_precompiled_manifest_uses_content_hashes(tmp_path, monkeypatch):
     source.write_text("version two")
     os.utime(source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
     assert jit_utils.get_precompiled_artifact_path(source, artifact.name) is None
+
+
+@pytest.mark.parametrize("is_directory", (False, True))
+def test_precompiled_manifest_survives_package_relocation(tmp_path, monkeypatch, is_directory):
+    package_dir = tmp_path / "build" / "humming"
+    source_dir = package_dir / "csrc" / "launcher"
+    source_dir.mkdir(parents=True)
+    source_file = source_dir / "launcher.cpp"
+    source_file.write_bytes(b"native source\n")
+    source = source_dir if is_directory else source_file
+    native_dir = package_dir / "_native" / jit_utils.get_native_arch()
+    native_dir.mkdir(parents=True)
+    artifact = native_dir / "helper"
+    artifact.write_bytes(b"native artifact")
+    jit_utils.write_precompiled_artifact_manifest(native_dir, {artifact.name: source})
+
+    installed_dir = tmp_path / "installed" / "humming"
+    shutil.copytree(package_dir, installed_dir)
+    monkeypatch.setattr(jit_utils, "__file__", str(installed_dir / "utils" / "jit.py"))
+    installed_source = installed_dir / source.relative_to(package_dir)
+    installed_artifact = installed_dir / artifact.relative_to(package_dir)
+    assert jit_utils.get_precompiled_artifact_path(installed_source, artifact.name) == installed_artifact
+
+
+@pytest.mark.parametrize(
+    "is_windows, expected",
+    [
+        (False, ("libhumming_launcher.so", "libcubinpatch.so", "_device_info.abi3.so", "nvrtc_compile")),
+        (True, ("humming_launcher.dll", "cubinpatch.dll", "_device_info.pyd", "nvrtc_compile.exe")),
+    ],
+)
+def test_native_artifact_names(monkeypatch, is_windows, expected):
+    monkeypatch.setattr(jit_utils, "IS_WINDOWS", is_windows)
+    components = ("launcher", "cubin_patcher", "device_info", "nvrtc_compile")
+    assert tuple(jit_utils.get_native_artifact_name(name) for name in components) == expected
+
+
+def test_windows_cuda_discovery(tmp_path, monkeypatch):
+    from humming.utils import cuda
+
+    toolkit = tmp_path / "CUDA Toolkit"
+    (toolkit / "include").mkdir(parents=True)
+    (toolkit / "include" / "cuda.h").touch()
+    (toolkit / "bin").mkdir()
+    (toolkit / "bin" / "nvcc.exe").touch()
+    (toolkit / "version.json").write_text('{"cuda": {"version": "13.4.0"}}')
+    monkeypatch.setattr(jit_utils, "IS_WINDOWS", True)
+    monkeypatch.setenv("CUDA_PATH", str(toolkit))
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.setattr(cuda, "_find_nvidia_pypi_cuda_paths", lambda: [])
+
+    environments = cuda.find_all_cuda_paths.__wrapped__()
+    (environment,) = [value for value in environments if value["path"] == str(toolkit)]
+    assert environment["major"] == 13
+    assert environment["minor"] == 4
+    assert environment["binaries"]["nvcc"] == str(toolkit / "bin" / "nvcc.exe")
+
+
+def test_cuda_discovery_rejects_cpu_only_torch(monkeypatch):
+    from humming.utils.cuda import filter_cuda_paths
+
+    monkeypatch.setattr(torch.version, "cuda", None)
+    with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch is required"):
+        filter_cuda_paths()
+
+
+@pytest.mark.parametrize("component_dir", ("", "cuda_nvrtc"))
+def test_windows_cuda_libraries(tmp_path, monkeypatch, component_dir):
+    from humming.utils import cuda, nvrtc
+
+    root = tmp_path / component_dir
+    library_dir = root / "lib" / "arm64"
+    binary_dir = root / "bin" / "arm64"
+    library_dir.mkdir(parents=True)
+    binary_dir.mkdir(parents=True)
+    (library_dir / "cuda.lib").touch()
+    (binary_dir / "nvrtc64_130_0.dll").touch()
+    (binary_dir / "nvrtc-builtins64_134.dll").touch()
+    environment = {"path": str(tmp_path), "include_paths": []}
+    monkeypatch.setattr(jit_utils, "IS_WINDOWS", True)
+    monkeypatch.setattr(jit_utils, "get_native_arch", lambda: "aarch64")
+    monkeypatch.setattr(cuda, "filter_cuda_paths", lambda **kwargs: environment)
+    monkeypatch.setattr(nvrtc, "filter_cuda_paths", lambda **kwargs: environment)
+    assert cuda.get_cuda_library_path("cuda.lib") == library_dir / "cuda.lib"
+    assert nvrtc.get_nvrtc_library_path() == str(binary_dir / "nvrtc64_130_0.dll")
+    (library_dir / "cuda.lib").unlink()
+    with pytest.raises(RuntimeError, match="Could not locate cuda.lib"):
+        cuda.get_cuda_library_path("cuda.lib")
+
+
+def test_msvc_build_keeps_intermediates_out_of_package(tmp_path, monkeypatch):
+    commands = []
+    source = tmp_path / "source.cpp"
+    source.touch()
+    output = tmp_path / "native" / "helper.dll"
+
+    def run(command, **kwargs):
+        commands.append(command)
+        binary = Path(next(value.removeprefix("/OUT:") for value in command if value.startswith("/OUT:")))
+        assert binary.parent == Path(kwargs["cwd"])
+        binary.write_bytes(b"native binary")
+        (binary.parent / "source.obj").touch()
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(jit_utils.subprocess, "run", run)
+    jit_utils.build_msvc_native(source, output, "cl", include_paths=["include path"])
+    assert output.read_bytes() == b"native binary"
+    assert list(output.parent.iterdir()) == [output]
+    assert "/LD" in commands[0]
+    assert "/Iinclude path" in commands[0]
+    assert not any(value.startswith("-") for value in commands[0])
+
+
+def test_msvc_build_failure_preserves_existing_artifact(tmp_path, monkeypatch):
+    source = tmp_path / "source.cpp"
+    source.touch()
+    output = tmp_path / "helper.dll"
+    output.write_bytes(b"previous build")
+    monkeypatch.setattr(
+        jit_utils.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "compiler error"),
+    )
+    with pytest.raises(RuntimeError, match="compiler error"):
+        jit_utils.build_msvc_native(source, output, "cl", include_paths=[])
+    assert output.read_bytes() == b"previous build"
+
+
+def test_native_mapped_file(tmp_path):
+    compiler = jit_utils.get_cpp_compiler()
+    include_dir = Path(jit_utils.__file__).parents[1] / "csrc" / "launcher"
+    source = tmp_path / "mapped_file_test.cpp"
+    source.write_text(
+        '#include "mapped_file.h"\n'
+        "int main(int argc, char **argv) {\n"
+        "  MappedFile file(argv[1]);\n"
+        '  if (file.size() != 6 || std::memcmp(file.data(), "cubin!", 6) != 0) return 1;\n'
+        "  for (int i = 2; i < argc; ++i) {\n"
+        "    try { MappedFile invalid(argv[i]); return 2; }\n"
+        "    catch (const std::runtime_error &) {}\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+    )
+    binary = tmp_path / ("mapped_file_test.exe" if jit_utils.IS_WINDOWS else "mapped_file_test")
+    if jit_utils.IS_WINDOWS:
+        jit_utils.build_msvc_native(source, binary, compiler, include_paths=[str(include_dir)], shared=False)
+    else:
+        subprocess.run(
+            [compiler, "-std=c++17", f"-I{include_dir}", str(source), "-o", str(binary)],
+            check=True,
+        )
+    data = tmp_path / "file with spaces"
+    data.write_bytes(b"cubin!")
+    empty = tmp_path / "empty"
+    empty.touch()
+    subprocess.run([str(binary), str(data), str(empty), str(tmp_path / "missing")], check=True)
+
+
+def test_precompiled_native_helpers(tmp_path):
+    from humming.ops.utils import _get_precompiled_launcher_path, init_humming_launcher
+    from humming.utils import cubin, device, nvrtc
+
+    package_dir = Path(jit_utils.__file__).parents[1]
+    if not (package_dir / "_native").is_dir():
+        pytest.skip("requires precompiled native artifacts")
+    sources = {
+        "launcher": "launcher",
+        "device_info": "device_info.cpp",
+        "cubin_patcher": "patch_cubin.cpp",
+        "nvrtc_compile": "nvrtc_compile.cpp",
+    }
+    for component, source in sources.items():
+        artifact = jit_utils.get_precompiled_artifact_path(
+            package_dir / "csrc" / source, jit_utils.get_native_artifact_name(component)
+        )
+        assert artifact is not None, f"Missing or stale precompiled {component}"
+    assert _get_precompiled_launcher_path() is not None
+    init_humming_launcher()
+    assert device._get_device_info_extension()._DeviceInfo(-1) is not None
+    with pytest.raises(RuntimeError, match="rc=3"):
+        cubin.patch_cubin_bytes(b"not a cubin", "cvt_e3m4")
+
+    source = tmp_path / "smoke.cu"
+    source.write_text('extern "C" __global__ void smoke(float *x) { x[0] = 1.0f; }\n')
+    output = tmp_path / "smoke.cubin"
+    subprocess.run(
+        [
+            nvrtc.may_build_nvrtc_compile_binary(),
+            "--nvrtc-path",
+            nvrtc.get_nvrtc_library_path(),
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--",
+            "--gpu-architecture=sm_80",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert cubin.get_cubin_kernel_names(output) == ["smoke"]
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")

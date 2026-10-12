@@ -54,6 +54,38 @@ Or install from source:
 pip install git+https://github.com/vllm-project/humming.git
 ```
 
+#### Windows ARM64
+
+Windows ARM64 wheels are available for CPython 3.11 and newer. This support is
+experimental and requires an NVIDIA GPU/driver supporting CUDA on Windows ARM64,
+CUDA 13.4 or newer, and a CUDA-enabled ARM64 PyTorch build. The CPU-only PyTorch
+wheel from PyPI is not sufficient. Install NVIDIA's CUDA-enabled build first:
+
+```powershell
+python -m pip install "torch==2.15.0.dev20260820+cu134" --extra-index-url https://pypi.nvidia.com/nvtorch_oot_nightly
+python -m pip install "humming-kernels[cu13]"
+```
+
+The Windows dependency is `triton-windows`, selected automatically instead of
+Linux Triton. CUDA 12 wheels/extras are not supported on Windows ARM64.
+
+To build from source, use an ARM64 Python interpreter and a Visual Studio
+developer shell targeting ARM64 with the C++ build tools and Windows SDK installed.
+Install the dependencies above (or set `CUDA_PATH` to a CUDA 13.4+ toolkit), then run:
+
+```powershell
+python -m pip install . build wheel
+python tools\build_native.py
+python -m build --wheel
+$wheel = Get-ChildItem dist\*.whl
+python -m wheel tags --remove --python-tag cp311 --abi-tag abi3 --platform-tag win_arm64 $wheel.FullName
+```
+
+The release workflow builds the native DLLs, Python extension, and NVRTC executable
+on `windows-11-arm`, tags the wheel `cp311-abi3-win_arm64`, and checks its ARM64
+binaries before uploading it alongside the Linux wheels. The existing release
+publisher includes all of these artifacts automatically.
+
 
 ### Usage Example
 
