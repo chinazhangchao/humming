@@ -69,7 +69,12 @@ void load_symbol(LibraryHandle library, T &symbol, const char *name) {
 
 void load_nvrtc(const std::string &configured_path) {
 #ifdef _WIN32
-  auto wide_path = std::filesystem::u8path(configured_path);
+  auto wide_path = std::filesystem::absolute(std::filesystem::u8path(configured_path));
+  // NVRTC loads its builtins later, so keep this directory available for the process lifetime.
+  if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS))
+    die("cannot configure DLL search: " + std::system_category().message(GetLastError()));
+  if (AddDllDirectory(wide_path.parent_path().c_str()) == nullptr)
+    die("cannot add NVRTC DLL directory: " + std::system_category().message(GetLastError()));
   LibraryHandle library = LoadLibraryExW(
       wide_path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
   if (library == nullptr)

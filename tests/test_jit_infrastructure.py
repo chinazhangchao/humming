@@ -290,7 +290,13 @@ def test_precompiled_native_helpers(tmp_path):
     source = tmp_path / "smoke.cu"
     source.write_text('extern "C" __global__ void smoke(float *x) { x[0] = 1.0f; }\n')
     output = tmp_path / "smoke.cubin"
-    subprocess.run(
+    environment = os.environ.copy()
+    if jit_utils.IS_WINDOWS:
+        environment = {
+            name: value for name, value in environment.items() if not name.upper().startswith("CUDA")
+        }
+        environment["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
+    result = subprocess.run(
         [
             nvrtc.may_build_nvrtc_compile_binary(),
             "--nvrtc-path",
@@ -302,10 +308,11 @@ def test_precompiled_native_helpers(tmp_path):
             "--",
             "--gpu-architecture=sm_80",
         ],
-        check=True,
+        env=environment,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, f"NVRTC exited with {result.returncode}:\n{result.stdout}\n{result.stderr}"
     assert cubin.get_cubin_kernel_names(output) == ["smoke"]
 
 
