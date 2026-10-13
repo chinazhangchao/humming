@@ -171,12 +171,21 @@ def test_cuda_discovery_rejects_cpu_only_torch(monkeypatch):
 
 
 @pytest.mark.parametrize("component_dir", ("", "cuda_nvrtc"))
-def test_windows_cuda_libraries(tmp_path, monkeypatch, component_dir):
+@pytest.mark.parametrize(
+    "native_arch, directory_arch",
+    [
+        ("aarch64", "arm64"),
+        ("x86_64", "x64"),
+        ("x86_64", "x86_64"),
+        ("x86_64", ""),
+    ],
+)
+def test_windows_cuda_libraries(tmp_path, monkeypatch, component_dir, native_arch, directory_arch):
     from humming.utils import cuda, nvrtc
 
     root = tmp_path / component_dir
-    library_dir = root / "lib" / "arm64"
-    binary_dir = root / "bin" / "arm64"
+    library_dir = root / "lib" / directory_arch
+    binary_dir = root / "bin" / directory_arch
     library_dir.mkdir(parents=True)
     binary_dir.mkdir(parents=True)
     (library_dir / "cuda.lib").touch()
@@ -184,14 +193,24 @@ def test_windows_cuda_libraries(tmp_path, monkeypatch, component_dir):
     (binary_dir / "nvrtc-builtins64_134.dll").touch()
     environment = {"path": str(tmp_path), "include_paths": []}
     monkeypatch.setattr(jit_utils, "IS_WINDOWS", True)
-    monkeypatch.setattr(jit_utils, "get_native_arch", lambda: "aarch64")
+    monkeypatch.setattr(jit_utils, "get_native_arch", lambda: native_arch)
     monkeypatch.setattr(cuda, "filter_cuda_paths", lambda **kwargs: environment)
     monkeypatch.setattr(nvrtc, "filter_cuda_paths", lambda **kwargs: environment)
     assert cuda.get_cuda_library_path("cuda.lib") == library_dir / "cuda.lib"
     assert nvrtc.get_nvrtc_library_path() == str(binary_dir / "nvrtc64_130_0.dll")
     (library_dir / "cuda.lib").unlink()
+    other_arch = "x86_64" if native_arch == "aarch64" else "arm64"
+    other_library_dir = root / "lib" / other_arch
+    other_library_dir.mkdir(parents=True, exist_ok=True)
+    (other_library_dir / "cuda.lib").touch()
     with pytest.raises(RuntimeError, match="Could not locate cuda.lib"):
         cuda.get_cuda_library_path("cuda.lib")
+    (binary_dir / "nvrtc64_130_0.dll").unlink()
+    other_binary_dir = root / "bin" / other_arch
+    other_binary_dir.mkdir(parents=True, exist_ok=True)
+    (other_binary_dir / "nvrtc64_130_0.dll").touch()
+    with pytest.raises(RuntimeError, match="Could not locate the NVRTC library"):
+        nvrtc.get_nvrtc_library_path()
 
 
 def test_msvc_build_keeps_intermediates_out_of_package(tmp_path, monkeypatch):

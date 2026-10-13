@@ -93,14 +93,18 @@ def _find_binary(root, name):
     return None
 
 
+def get_cuda_arch_directory_names() -> tuple[str, ...]:
+    return ("arm64",) if jit_utils.get_native_arch() == "aarch64" else ("x64", "x86_64")
+
+
 def get_cuda_library_path(name: str) -> Path:
     environment = filter_cuda_paths()
     root = Path(environment["path"])
-    arch = "arm64" if jit_utils.get_native_arch() == "aarch64" else "x64"
+    arch_names = get_cuda_arch_directory_names()
     candidates = [
-        root / "lib" / arch,
+        *[root / "lib" / arch for arch in arch_names],
         root / "lib",
-        *sorted(root.glob(f"*/lib/{arch}")),
+        *[directory for arch in arch_names for directory in sorted(root.glob(f"*/lib/{arch}"))],
         *sorted(root.glob("*/lib")),
     ]
     for directory in candidates:

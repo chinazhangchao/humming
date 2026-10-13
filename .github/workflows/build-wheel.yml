@@ -82,8 +82,30 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  wheel-windows-arm64:
-    runs-on: windows-11-arm
+  wheel-windows:
+    name: wheel-windows-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            arch: x64
+            native_arch: x86_64
+            msvc_arch: amd64
+            wheel_platform: win_amd64
+            pe_machine: "0x8664"
+            torch_version: "2.11.0+cu130"
+            torch_index_url: https://download.pytorch.org/whl/cu130
+          - runner: windows-11-arm
+            arch: arm64
+            native_arch: aarch64
+            msvc_arch: amd64_arm64
+            wheel_platform: win_arm64
+            pe_machine: "0xAA64"
+            # CUDA-enabled Windows ARM64 PyTorch is currently distributed by NVIDIA.
+            torch_version: "2.15.0.dev20260820+cu134"
+            torch_index_url: https://pypi.nvidia.com/nvtorch_oot_nightly
+    runs-on: ${{ matrix.runner }}
     env:
       HUMMING_DISABLE_PARALLEL_BUILD: "1"
     steps:
@@ -93,19 +115,18 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-          architecture: arm64
+          architecture: ${{ matrix.arch }}
       - uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: amd64_arm64
+          arch: ${{ matrix.msvc_arch }}
 
-      - name: Install Windows ARM64 build dependencies
+      - name: Install Windows build dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip build wheel setuptools_scm pytest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # CUDA-enabled Windows ARM64 PyTorch is currently distributed by NVIDIA.
-          python -m pip install "torch==2.15.0.dev20260820+cu134" `
-            --extra-index-url https://pypi.nvidia.com/nvtorch_oot_nightly
+          python -m pip install "torch==${{ matrix.torch_version }}" `
+            --extra-index-url ${{ matrix.torch_index_url }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install . `
             "nvidia-cuda-runtime==13.4.92" `
@@ -123,10 +144,10 @@ jobs:
           $wheel = Get-ChildItem dist\*.whl
           if ($wheel.Count -ne 1) { throw "Expected exactly one wheel" }
           python -m wheel tags --remove --python-tag cp311 --abi-tag abi3 `
-            --platform-tag win_arm64 $wheel.FullName
+            --platform-tag ${{ matrix.wheel_platform }} $wheel.FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Inspect Windows ARM64 wheel
+      - name: Inspect Windows wheel
         shell: python
         run: |
           import glob
@@ -134,10 +155,11 @@ jobs:
           import struct
           import zipfile
 
-          assert platform.machine().lower() == "arm64", platform.machine()
-          wheels = glob.glob("dist/*-cp311-abi3-win_arm64.whl")
+          native_arch = {"amd64": "x86_64", "arm64": "aarch64"}[platform.machine().lower()]
+          assert native_arch == "${{ matrix.native_arch }}", platform.machine()
+          wheels = glob.glob("dist/*-cp311-abi3-${{ matrix.wheel_platform }}.whl")
           assert len(wheels) == 1, wheels
-          native_dir = "humming/_native/aarch64/"
+          native_dir = "humming/_native/${{ matrix.native_arch }}/"
           expected = {
               native_dir + name
               for name in (
@@ -150,14 +172,14 @@ jobs:
               assert native_files == expected, native_files
               metadata_name, = [name for name in wheel.namelist() if name.endswith(".dist-info/WHEEL")]
               metadata = wheel.read(metadata_name).decode()
-              assert "Tag: cp311-abi3-win_arm64" in metadata, metadata
+              assert "Tag: cp311-abi3-${{ matrix.wheel_platform }}" in metadata, metadata
               for name in expected - {native_dir + "manifest.json"}:
                   binary = wheel.read(name)
                   assert binary[:2] == b"MZ", name
                   offset, = struct.unpack_from("<I", binary, 0x3C)
                   assert binary[offset:offset + 4] == b"PE\0\0", name
                   machine, = struct.unpack_from("<H", binary, offset + 4)
-                  assert machine == 0xAA64, (name, hex(machine))
+                  assert machine == int("${{ matrix.pe_machine }}", 16), (name, hex(machine))
 
       - name: Install and test wheel outside the source tree
         shell: pwsh
@@ -171,7 +193,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: humming-kernels-wheel-win_arm64
+          name: humming-kernels-wheel-${{ matrix.wheel_platform }}
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 90

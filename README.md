@@ -54,6 +54,20 @@ Or install from source:
 pip install git+https://github.com/vllm-project/humming.git
 ```
 
+#### Windows x64
+
+Windows x64 wheels are available for CPython 3.11 and newer. Install a CUDA-enabled
+x64 PyTorch build before installing Humming:
+
+```powershell
+python -m pip install "torch==2.11.0+cu130" --extra-index-url https://download.pytorch.org/whl/cu130
+python -m pip install "humming-kernels[cu13]"
+```
+
+For source builds, follow the commands below using an x64 Python interpreter and
+a Visual Studio developer shell targeting x64, and use the `win_amd64` wheel tag
+instead of `win_arm64`.
+
 #### Windows ARM64
 
 Windows ARM64 wheels are available for CPython 3.11 and newer. This support is
@@ -82,9 +96,11 @@ python -m wheel tags --remove --python-tag cp311 --abi-tag abi3 --platform-tag w
 ```
 
 The release workflow builds the native DLLs, Python extension, and NVRTC executable
-on `windows-11-arm`, tags the wheel `cp311-abi3-win_arm64`, and checks its ARM64
-binaries before uploading it alongside the Linux wheels. The existing release
-publisher includes all of these artifacts automatically.
+on `windows-2022` (x64) and `windows-11-arm` (ARM64). It produces
+`cp311-abi3-win_amd64` and `cp311-abi3-win_arm64` wheels, checks their native
+architectures, and tests the installed wheels before uploading them alongside the
+Linux wheels. The existing release publisher includes all of these artifacts
+automatically.
 
 
 ### Usage Example

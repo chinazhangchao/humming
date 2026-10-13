@@ -35,7 +35,8 @@ def get_cpp_compiler() -> str:
         compiler = shutil.which("c++")
     if compiler is None:
         raise RuntimeError(
-            "A C++ compiler is required; on Windows, use an ARM64 Visual Studio developer shell"
+            "A C++ compiler is required; on Windows, use a Visual Studio developer shell "
+            "targeting the Python architecture"
         )
     return compiler
 

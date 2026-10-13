@@ -8,7 +8,7 @@ from pathlib import Path
 from filelock import FileLock
 
 import humming.utils.jit as jit_utils
-from humming.utils.cuda import filter_cuda_paths
+from humming.utils.cuda import filter_cuda_paths, get_cuda_arch_directory_names
 
 
 def _select_nvrtc_lib(lib_dir):
@@ -34,11 +34,15 @@ def _find_nvrtc_lib_dir():
         *sorted(glob.glob(os.path.join(root, "*", "lib"))),
     ]
     if jit_utils.IS_WINDOWS:
-        arch = "arm64" if jit_utils.get_native_arch() == "aarch64" else "x64"
+        arch_names = get_cuda_arch_directory_names()
         candidates = [
-            os.path.join(root, "bin", arch),
+            *[os.path.join(root, "bin", arch) for arch in arch_names],
             os.path.join(root, "bin"),
-            *sorted(glob.glob(os.path.join(root, "*", "bin", arch))),
+            *[
+                directory
+                for arch in arch_names
+                for directory in sorted(glob.glob(os.path.join(root, "*", "bin", arch)))
+            ],
             *sorted(glob.glob(os.path.join(root, "*", "bin"))),
         ]
     for d in candidates:
