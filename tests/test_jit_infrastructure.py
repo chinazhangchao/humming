@@ -1,6 +1,10 @@
+import importlib.util
 import os
 import shutil
 import subprocess
+import sys
+import sysconfig
+import warnings
 from pathlib import Path
 
 import pytest
@@ -139,6 +143,26 @@ def test_native_artifact_names(monkeypatch, is_windows, expected):
     monkeypatch.setattr(jit_utils, "IS_WINDOWS", is_windows)
     components = ("launcher", "cubin_patcher", "device_info", "nvrtc_compile")
     assert tuple(jit_utils.get_native_artifact_name(name) for name in components) == expected
+
+
+@pytest.mark.parametrize("is_windows", (False, True))
+@pytest.mark.parametrize("cuda_variable", ("CUDA_HOME", "CUDA_PATH"))
+@pytest.mark.parametrize("name", ("nvcc", "nvcc.exe", "nvcc.EXE"))
+def test_cuda_command_executable_suffix(tmp_path, monkeypatch, is_windows, cuda_variable, name):
+    monkeypatch.setattr(jit_utils, "IS_WINDOWS", is_windows)
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.delenv(f"CUDA_{name.upper()}_PATH", raising=False)
+    monkeypatch.setenv(cuda_variable, str(tmp_path / "CUDA Toolkit"))
+    expected_name = "nvcc.exe" if is_windows and name == "nvcc" else name
+    expected = tmp_path / "CUDA Toolkit" / "bin" / expected_name
+    assert jit_utils.get_cuda_command_path.__wrapped__(name) == str(expected)
+
+
+@pytest.mark.parametrize("name", (r"C:\CUDA Toolkit\bin\nvcc.exe", "C:/CUDA Toolkit/bin/nvcc.exe"))
+def test_cuda_command_preserves_explicit_path(monkeypatch, name):
+    monkeypatch.setattr(jit_utils, "IS_WINDOWS", True)
+    assert jit_utils.get_cuda_command_path.__wrapped__(name) == name
 
 
 def test_windows_cuda_discovery(tmp_path, monkeypatch):
@@ -280,6 +304,78 @@ def test_native_mapped_file(tmp_path):
     empty = tmp_path / "empty"
     empty.touch()
     subprocess.run([str(binary), str(data), str(empty), str(tmp_path / "missing")], check=True)
+
+
+@pytest.fixture(scope="module")
+def mock_device_info(tmp_path_factory):
+    from humming.utils.device import _get_cuda_include_paths
+
+    source = Path(__file__).parent / "native" / "device_info_mock.cpp"
+    csrc_dir = Path(jit_utils.__file__).parents[1] / "csrc"
+    output = tmp_path_factory.mktemp("device-info") / jit_utils.get_native_artifact_name("device_info")
+    compiler = jit_utils.get_cpp_compiler()
+    include_paths = [str(csrc_dir), sysconfig.get_paths()["include"], *_get_cuda_include_paths()]
+    if jit_utils.IS_WINDOWS:
+        jit_utils.build_msvc_native(
+            source,
+            output,
+            compiler,
+            include_paths=include_paths,
+            link_args=[str(Path(sys.base_prefix) / "libs" / "python3.lib")],
+        )
+    else:
+        subprocess.run(
+            [
+                compiler,
+                "-std=c++17",
+                "-shared",
+                "-fPIC",
+                *[f"-I{path}" for path in include_paths],
+                str(source),
+                "-o",
+                str(output),
+            ],
+            check=True,
+        )
+    spec = importlib.util.spec_from_file_location("humming_test._device_info", output)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        _ = module._DeviceInfo(0).memory_bus_width
+    is_windows_arm64 = jit_utils.IS_WINDOWS and jit_utils.get_native_arch() == "aarch64"
+    expected_warnings = 2 if is_windows_arm64 else 0
+    assert len(recorded) == expected_warnings
+    for warning in recorded:
+        assert warning.category is RuntimeWarning
+        assert "using GB10-reference clocks and bus width" in str(warning.message)
+    return module
+
+
+@pytest.mark.parametrize(
+    "device_index, sm_version, bus_width, sm_count",
+    [(0, 121, 0, 48), (1, 121, 128, 40), (2, 120, 0, 32), (3, 89, 0, 24), (4, 121, 0, 16), (5, 121, -1, 24)],
+)
+def test_windows_device_metadata_fallback(mock_device_info, device_index, sm_version, bus_width, sm_count):
+    info = mock_device_info._DeviceInfo(device_index)
+    is_windows_arm64 = jit_utils.IS_WINDOWS and jit_utils.get_native_arch() == "aarch64"
+    use_fallback = is_windows_arm64 and sm_version == 121 and bus_width == 0
+    expected_bus_width = 256 if use_fallback else bus_width
+    expected_memory_clock = 8533000 if use_fallback else 1048576
+    expected_sm_clock = 3003000 if use_fallback else 1048576
+    assert info.sm_version == sm_version
+    assert info.sm_count == sm_count
+    assert info.memory_bus_width == expected_bus_width
+    assert info.memory_clock_khz == expected_memory_clock
+    assert info.sm_clock_khz == expected_sm_clock
+    multiplier = 1 if sm_version == 121 else 2
+    expected_bandwidth = expected_memory_clock * multiplier * expected_bus_width / 8 / 1e6
+    assert info.memory_bandwidth_gbps == pytest.approx(expected_bandwidth)
+    ops_per_clock = 512 if sm_version == 89 else 1024
+    assert info.tensorcore_tops["float16"] == pytest.approx(
+        sm_count * ops_per_clock * expected_sm_clock / 1e9
+    )
 
 
 def test_precompiled_native_helpers(tmp_path):

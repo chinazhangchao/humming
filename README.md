@@ -83,6 +83,19 @@ python -m pip install "humming-kernels[cu13]"
 The Windows dependency is `triton-windows`, selected automatically instead of
 Linux Triton. CUDA 12 wheels/extras are not supported on Windows ARM64.
 
+Some Windows ARM64 SM121 drivers report zero memory bus width, which would make
+the bandwidth-based tuning calculations fail. Only for that zero-width case,
+Humming emits a `RuntimeWarning` and uses GB10-reference values: 8,533,000 kHz
+effective memory data rate, a 256-bit memory bus, and a 3,003,000 kHz SM clock.
+SM count is still queried, and bandwidth and Tensor Core throughput remain
+calculated from the primitive values. Nonzero bus-width reports, other GPU
+architectures, Windows x64, and Linux are unchanged.
+
+The memory values come from the
+[DGX Spark hardware specification](https://docs.nvidia.com/dgx/dgx-spark/hardware.html);
+the SM clock is based on GB10 NVML reporting. These are reference estimates for
+tuning, not independently verified specifications for every SM121 device.
+
 To build from source, use an ARM64 Python interpreter and a Visual Studio
 developer shell targeting ARM64 with the C++ build tools and Windows SDK installed.
 Install the dependencies above (or set `CUDA_PATH` to a CUDA 13.4+ toolkit), then run:

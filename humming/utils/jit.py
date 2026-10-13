@@ -154,7 +154,8 @@ def get_cuda_command_path(name):
         return cuda_command_path
     cuda_home_path = os.getenv("CUDA_HOME") or os.getenv("CUDA_PATH")
     if cuda_home_path is not None:
-        executable_name = name + ".exe" if IS_WINDOWS else name
+        needs_executable_suffix = IS_WINDOWS and not name.lower().endswith(".exe")
+        executable_name = name + ".exe" if needs_executable_suffix else name
         return os.path.join(cuda_home_path, "bin", executable_name)
 
     cuda_command_path = f"/usr/local/cuda/bin/{name}"
