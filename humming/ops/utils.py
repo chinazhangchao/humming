@@ -195,7 +195,8 @@ def _get_precompiled_launcher_path() -> Path | None:
 
     humming_dir = Path(__file__).parents[1]
     csrc_dir = humming_dir / "csrc" / "launcher"
-    return jit_utils.get_precompiled_artifact_path(csrc_dir, jit_utils.get_native_artifact_name("launcher"))
+    artifact_name = jit_utils.get_native_artifact_name("launcher")
+    return jit_utils.get_precompiled_artifact_path(csrc_dir, artifact_name)
 
 
 def init_humming_launcher():
@@ -231,7 +232,11 @@ def init_humming_launcher():
         extra_cflags = ["-O3", f"-DUSE_TORCH_STABLE_API={int(USE_TORCH_STABLE_API)}"]
         extra_ldflags = ["-lcuda", "-lc10_cuda", "-ltorch_cuda"]
         if jit_utils.IS_WINDOWS:
-            extra_cflags = ["/O2", "/DNOMINMAX", f"/DUSE_TORCH_STABLE_API={int(USE_TORCH_STABLE_API)}"]
+            extra_cflags = [
+                "/O2",
+                "/DNOMINMAX",
+                f"/DUSE_TORCH_STABLE_API={int(USE_TORCH_STABLE_API)}",
+            ]
             torch_lib_dir = Path(torch.__file__).parent / "lib"
             extra_ldflags = [
                 str(get_cuda_library_path("cuda.lib")),

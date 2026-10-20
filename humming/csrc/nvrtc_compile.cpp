@@ -2,7 +2,6 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <filesystem>
 #include <system_error>
 #include <windows.h>
 #else
@@ -10,9 +9,11 @@
 #endif
 #include <nvrtc.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -51,6 +52,17 @@ void die(const std::string &msg) {
 
 #ifdef _WIN32
 using LibraryHandle = HMODULE;
+
+std::string to_utf8(const wchar_t *value) {
+  int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, nullptr, 0, nullptr, nullptr);
+  if (size == 0)
+    die("cannot encode argument as UTF-8: " + std::system_category().message(GetLastError()));
+  std::string result(size, '\0');
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, result.data(), size, nullptr, nullptr) == 0)
+    die("cannot encode argument as UTF-8: " + std::system_category().message(GetLastError()));
+  result.pop_back();
+  return result;
+}
 #else
 using LibraryHandle = void *;
 #endif
@@ -98,7 +110,7 @@ void load_nvrtc(const std::string &configured_path) {
 }
 
 std::string read_file(const std::string &path) {
-  std::ifstream f(path, std::ios::binary);
+  std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
   if (!f) die("cannot open " + path);
   std::ostringstream ss;
   ss << f.rdbuf();
@@ -106,7 +118,7 @@ std::string read_file(const std::string &path) {
 }
 
 void write_file(const std::string &path, const void *data, size_t size) {
-  std::ofstream f(path, std::ios::binary);
+  std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
   if (!f) die("cannot write " + path);
   f.write(static_cast<const char *>(data), size);
 }
@@ -130,14 +142,14 @@ struct Args {
   std::vector<std::string> nvrtc_flags;
 };
 
-Args parse_args(int argc, char **argv) {
+Args parse_args(const std::vector<std::string> &argv) {
   Args a;
-  int i = 1;
+  size_t i = 1;
   auto need = [&](const char *opt) {
-    if (i + 1 >= argc) die(std::string("missing value for ") + opt);
-    return std::string(argv[++i]);
+    if (i + 1 >= argv.size()) die(std::string("missing value for ") + opt);
+    return argv[++i];
   };
-  for (; i < argc; ++i) {
+  for (; i < argv.size(); ++i) {
     std::string s = argv[i];
     if (s == "--") {
       ++i;
@@ -162,7 +174,7 @@ Args parse_args(int argc, char **argv) {
       std::exit(0);
     } else die("unknown option: " + s);
   }
-  for (; i < argc; ++i)
+  for (; i < argv.size(); ++i)
     a.nvrtc_flags.emplace_back(argv[i]);
   if (a.nvrtc_path.empty()) die("--nvrtc-path is required");
   if (a.input.empty()) die("--input is required");
@@ -172,8 +184,17 @@ Args parse_args(int argc, char **argv) {
 
 } // namespace
 
+#ifdef _WIN32
+int wmain(int argc, wchar_t **argv) {
+  std::vector<std::string> arguments;
+  arguments.reserve(argc);
+  for (int i = 0; i < argc; ++i)
+    arguments.push_back(to_utf8(argv[i]));
+#else
 int main(int argc, char **argv) {
-  Args args = parse_args(argc, argv);
+  std::vector<std::string> arguments(argv, argv + argc);
+#endif
+  Args args = parse_args(arguments);
   load_nvrtc(args.nvrtc_path);
 
   std::string src = read_file(args.input);
@@ -190,9 +211,17 @@ int main(int argc, char **argv) {
     header_sources_c.push_back(header_contents.back().c_str());
   }
 
+  const char *program_name = args.input.c_str();
+#ifdef _WIN32
+  // NVRTC's in-memory source lookup rejects non-ASCII program names on Windows.
+  bool has_non_ascii_name = std::any_of(args.input.begin(), args.input.end(), [](unsigned char c) {
+    return c >= 0x80;
+  });
+  if (has_non_ascii_name) program_name = nullptr;
+#endif
   nvrtcProgram prog;
   NVRTC_CHECK(nvrtcCreateProgram(
-      &prog, src.c_str(), args.input.c_str(),
+      &prog, src.c_str(), program_name,
       static_cast<int>(args.headers.size()),
       header_sources_c.empty() ? nullptr : header_sources_c.data(),
       header_names_c.empty() ? nullptr : header_names_c.data()));
@@ -220,8 +249,8 @@ int main(int argc, char **argv) {
 
   if (compile_r != NVRTC_SUCCESS) {
     nvrtcDestroyProgram(&prog);
-    std::fprintf(stderr, "\nnvrtc_compile: compile failed: %s\n",
-                 nvrtcGetErrorString(compile_r));
+    std::fprintf(stderr, "\nnvrtc_compile: compile failed for %s: %s\n",
+        args.input.c_str(), nvrtcGetErrorString(compile_r));
     return 1;
   }
 

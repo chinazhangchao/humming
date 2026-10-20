@@ -172,7 +172,9 @@ def test_windows_cuda_discovery(tmp_path, monkeypatch):
     (toolkit / "include").mkdir(parents=True)
     (toolkit / "include" / "cuda.h").touch()
     (toolkit / "bin").mkdir()
-    (toolkit / "bin" / "nvcc.exe").touch()
+    nvcc = toolkit / "bin" / "nvcc.exe"
+    nvcc.touch()
+    nvcc.chmod(nvcc.stat().st_mode | 0o111)
     (toolkit / "version.json").write_text('{"cuda": {"version": "13.4.0"}}')
     monkeypatch.setattr(jit_utils, "IS_WINDOWS", True)
     monkeypatch.setenv("CUDA_PATH", str(toolkit))
@@ -429,6 +431,63 @@ def test_precompiled_native_helpers(tmp_path):
     )
     assert result.returncode == 0, f"NVRTC exited with {result.returncode}:\n{result.stdout}\n{result.stderr}"
     assert cubin.get_cubin_kernel_names(output) == ["smoke"]
+
+
+@pytest.mark.skipif(not jit_utils.IS_WINDOWS, reason="requires Windows DLL loading")
+@pytest.mark.parametrize("unicode_library_path", (False, True))
+@pytest.mark.parametrize("emit_ptx", (False, True))
+def test_nvrtc_compile_unicode_paths(tmp_path, unicode_library_path, emit_ptx):
+    from humming.utils import cubin, nvrtc
+
+    work_dir = tmp_path / "NVRTC \u00e9\u4e2d\u6587"
+    work_dir.mkdir()
+    library = Path(nvrtc.get_nvrtc_library_path())
+    if unicode_library_path:
+        library_dir = work_dir / "bin"
+        library_dir.mkdir()
+        for dependency in library.parent.glob("nvrtc*.dll"):
+            shutil.copyfile(dependency, library_dir / dependency.name)
+        library = library_dir / library.name
+
+    source = work_dir / "\u6e90.cu"
+    header = work_dir / "\u5934.h"
+    output = work_dir / ("\u8f93\u51fa.ptx" if emit_ptx else "\u8f93\u51fa.cubin")
+    log = work_dir / "\u65e5\u5fd7.log"
+    source.write_text(
+        '#include "value.h"\nextern "C" __global__ void smoke(float *x) { x[0] = VALUE; }\n',
+        encoding="utf-8",
+    )
+    header.write_text("#define VALUE 1.0f\n", encoding="utf-8")
+    environment = {
+        name: value for name, value in os.environ.items() if not name.upper().startswith("CUDA")
+    }
+    environment["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
+    result = subprocess.run(
+        [
+            nvrtc.may_build_nvrtc_compile_binary(),
+            "--nvrtc-path",
+            str(library),
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--log",
+            str(log),
+            "--header",
+            f"value.h={header}",
+            *(["--ptx"] if emit_ptx else []),
+            "--",
+            "--gpu-architecture=sm_80",
+        ],
+        env=environment,
+        capture_output=True,
+    )
+    assert result.returncode == 0, f"NVRTC exited with {result.returncode}:\n{result.stdout}\n{result.stderr}"
+    assert log.is_file()
+    if emit_ptx:
+        assert ".entry smoke(" in output.read_text(encoding="utf-8")
+    else:
+        assert cubin.get_cubin_kernel_names(output) == ["smoke"]
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
